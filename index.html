@@ -72,6 +72,16 @@
       cursor: default;
     }
 
+    #mode-btn.ai-on {
+      background-color: #89b4fa;
+      color: #11111b;
+      font-weight: 600;
+    }
+
+    #mode-btn.ai-on:hover:not(:disabled) {
+      background-color: #a6c8fb;
+    }
+
     footer {
       font-size: 12px;
       color: #8888a0;
@@ -95,9 +105,10 @@
   <div class="controls">
     <button type="button" id="start-btn">开始游戏</button>
     <button type="button" id="pause-btn">暂停</button>
+    <button type="button" id="mode-btn">AI 自动模式：关</button>
   </div>
 
-  <footer>使用方向键或 WASD 控制移动，空格暂停 / 继续</footer>
+  <footer>手动模式：方向键 / WASD 移动，空格暂停；也可切换 AI 自动模式</footer>
 
   <script>
     // ==================== 常量配置 ====================
@@ -107,6 +118,7 @@
     const highScoreEl = document.getElementById('high-score');
     const startBtn = document.getElementById('start-btn');
     const pauseBtn = document.getElementById('pause-btn');
+    const modeBtn = document.getElementById('mode-btn');
 
     const GRID_SIZE = 20;            // 每个格子的像素大小
     const GRID_COUNT = 20;           // 每条边的格数（400 / 20 = 20）
@@ -138,6 +150,7 @@
     let score = 0;
     let highScore = Number(localStorage.getItem(STORAGE_KEY)) || 0;
     let state = 'idle';                   // idle | running | paused | over
+    let mode = 'manual';                  // manual | ai
     let timer = null;
 
     highScoreEl.textContent = highScore;
@@ -199,8 +212,11 @@
 
     // ==================== 核心逻辑：每一步移动 ====================
     function tick() {
-      // 应用排队的方向输入
-      if (directionQueue.length > 0) {
+      // 决定本步方向：AI 模式由决策算法给出，手动模式取排队输入
+      if (mode === 'ai') {
+        const aiDir = decideAiDirection();
+        if (aiDir) direction = aiDir;
+      } else if (directionQueue.length > 0) {
         direction = directionQueue.shift();
       }
 
@@ -266,13 +282,192 @@
       return freeCells[Math.floor(Math.random() * freeCells.length)];
     }
 
+    // ==================== AI 自动决策（仅自动模式使用） ====================
+    // 两段式保命策略：
+    //   ① BFS 找蛇头到食物的最短路径，逐步模拟验证路径合法，
+    //      且"吃完后"的剩余活动空间（flood-fill）足够容纳蛇身才去吃；
+    //   ② 追食物不安全时，沿最短路径跟随自己的蛇尾绕圈保命；
+    //   ③ 再不行则走向当前可达空间最大的邻格；
+    //   ④ 全部失败返回 null，保持原方向（会正常触发碰撞结束）。
+
+    const FOUR_DIRS = [
+      DIRECTIONS.up, DIRECTIONS.down, DIRECTIONS.left, DIRECTIONS.right
+    ];
+
+    function cellKey(c) {
+      return c.x + ',' + c.y;
+    }
+
+    // 静态网格 BFS：返回 start 之后到 target 的每一步格子（含 target），不可达返回 null
+    // blocked 中的格子视为障碍，但 target 本身始终允许进入
+    function bfsPath(start, target, blocked) {
+      const startKey = cellKey(start);
+      const queue = [start];
+      const visited = new Set([startKey]);
+      const prev = new Map();
+
+      while (queue.length > 0) {
+        const cur = queue.shift();
+        if (cur.x === target.x && cur.y === target.y) {
+          const path = [];
+          let nodeKey = cellKey(cur);
+          while (nodeKey !== startKey) {
+            const parts = nodeKey.split(',');
+            path.push({ x: Number(parts[0]), y: Number(parts[1]) });
+            nodeKey = prev.get(nodeKey);
+          }
+          path.reverse();
+          return path;
+        }
+        for (let i = 0; i < FOUR_DIRS.length; i++) {
+          const d = FOUR_DIRS[i];
+          const next = { x: cur.x + d.x, y: cur.y + d.y };
+          const k = cellKey(next);
+          if (next.x < 0 || next.x >= GRID_COUNT ||
+              next.y < 0 || next.y >= GRID_COUNT) continue;
+          if (visited.has(k)) continue;
+          const isTarget = next.x === target.x && next.y === target.y;
+          if (blocked.has(k) && !isTarget) continue;
+          visited.add(k);
+          prev.set(k, cellKey(cur));
+          queue.push(next);
+        }
+      }
+      return null;
+    }
+
+    // flood-fill：从 start 出发避开 blocked 的可达格子数量
+    function reachableCount(start, blocked) {
+      const seen = new Set([cellKey(start)]);
+      const stack = [start];
+      let count = 0;
+      while (stack.length > 0) {
+        const cur = stack.pop();
+        count++;
+        for (let i = 0; i < FOUR_DIRS.length; i++) {
+          const d = FOUR_DIRS[i];
+          const next = { x: cur.x + d.x, y: cur.y + d.y };
+          const k = cellKey(next);
+          if (next.x < 0 || next.x >= GRID_COUNT ||
+              next.y < 0 || next.y >= GRID_COUNT) continue;
+          if (seen.has(k) || blocked.has(k)) continue;
+          seen.add(k);
+          stack.push(next);
+        }
+      }
+      return count;
+    }
+
+    // 判断"下一步走到 step"在当前局面下是否合法
+    // willEat=false 时蛇尾本步会移走，蛇尾格允许进入
+    function isStepLegalNow(step, willEat) {
+      if (step.x < 0 || step.x >= GRID_COUNT ||
+          step.y < 0 || step.y >= GRID_COUNT) return false;
+      const limit = willEat ? snake.length : snake.length - 1;
+      for (let i = 0; i < limit; i++) {
+        if (snake[i].x === step.x && snake[i].y === step.y) return false;
+      }
+      return true;
+    }
+
+    // 沿给定路径逐步模拟蛇的移动，返回走完后的蛇身副本；任一步非法返回 null
+    function simulatePath(body, path) {
+      const sim = body.map(function (s) { return { x: s.x, y: s.y }; });
+      for (let p = 0; p < path.length; p++) {
+        const step = path[p];
+        if (step.x < 0 || step.x >= GRID_COUNT ||
+            step.y < 0 || step.y >= GRID_COUNT) return null;
+        const willEat = food !== null && step.x === food.x && step.y === food.y;
+        // 不吃食物时蛇尾本步会移走，蛇尾格允许进入
+        const limit = willEat ? sim.length : sim.length - 1;
+        let hit = false;
+        for (let i = 0; i < limit; i++) {
+          if (sim[i].x === step.x && sim[i].y === step.y) { hit = true; break; }
+        }
+        if (hit) return null;
+        sim.unshift({ x: step.x, y: step.y });
+        if (!willEat) sim.pop();
+      }
+      return sim;
+    }
+
+    // 评估"下一步走到 step（不吃食物）"之后，蛇头的可达格子数量
+    function spaceAfterStep(step) {
+      const sim = snake.map(function (s) { return { x: s.x, y: s.y }; });
+      sim.unshift({ x: step.x, y: step.y });
+      sim.pop();
+      return reachableCount(sim[0], new Set(sim.map(cellKey)));
+    }
+
+    // 由"蛇头 -> 下一步格子"的位移反查方向对象
+    function dirBetween(from, to) {
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      for (let i = 0; i < FOUR_DIRS.length; i++) {
+        if (FOUR_DIRS[i].x === dx && FOUR_DIRS[i].y === dy) return FOUR_DIRS[i];
+      }
+      return null;
+    }
+
+    // AI 每一步的决策入口，返回一个方向对象（或 null）
+    function decideAiDirection() {
+      if (!food) return null;
+      const head = snake[0];
+
+      // 静态障碍：当前蛇身（蛇尾下一步会离开，不视为障碍）
+      const blockedStatic = new Set();
+      for (let i = 0; i < snake.length - 1; i++) {
+        blockedStatic.add(cellKey(snake[i]));
+      }
+
+      // ① 尝试沿最短路径去吃食物
+      const foodPath = bfsPath(head, food, blockedStatic);
+      if (foodPath && foodPath.length > 0) {
+        const sim = simulatePath(snake, foodPath);
+        if (sim) {
+          // 吃完食物后蛇已变长，整副身体都占着格子；评估蛇头剩余活动空间
+          const blockedAfter = new Set(sim.map(cellKey));
+          const space = reachableCount(sim[0], blockedAfter);
+          if (space >= sim.length) {
+            return dirBetween(head, foodPath[0]);
+          }
+        }
+      }
+
+      // ② 不安全就追尾：贴着自己的蛇尾走，但要求走完后仍有容纳整条蛇的空间
+      const tail = snake[snake.length - 1];
+      const tailPath = bfsPath(head, tail, blockedStatic);
+      if (tailPath && tailPath.length > 0 && isStepLegalNow(tailPath[0], false) &&
+          spaceAfterStep(tailPath[0]) >= snake.length) {
+        return dirBetween(head, tailPath[0]);
+      }
+
+      // ③ 漫游兜底：选择走完后可达空间最大的合法邻格
+      let bestDir = null;
+      let bestSpace = -1;
+      for (let i = 0; i < FOUR_DIRS.length; i++) {
+        const d = FOUR_DIRS[i];
+        const next = { x: head.x + d.x, y: head.y + d.y };
+        if (!isStepLegalNow(next, false)) continue;
+        const space = spaceAfterStep(next);
+        if (space > bestSpace) {
+          bestSpace = space;
+          bestDir = d;
+        }
+      }
+      if (bestDir) return bestDir;
+
+      // ④ 彻底无路可走，交由主循环按原方向移动并正常判定游戏结束
+      return null;
+    }
+
     // ==================== 键盘输入 ====================
     document.addEventListener('keydown', function (e) {
       const key = e.key.toLowerCase();
 
       if (KEY_MAP[key]) {
         e.preventDefault();   // 阻止方向键滚动页面
-        if (state !== 'running') return;
+        if (state !== 'running' || mode !== 'manual') return;
 
         const next = DIRECTIONS[KEY_MAP[key]];
         // 与队列中最新方向比较；队列最多缓存 2 个输入
@@ -294,6 +489,16 @@
     // 按钮控制
     startBtn.addEventListener('click', startGame);
     pauseBtn.addEventListener('click', togglePause);
+    modeBtn.addEventListener('click', toggleMode);
+
+    // 切换 手动 / AI 自动 模式（任何状态下都可切换，模式跨局保留）
+    function toggleMode() {
+      mode = mode === 'manual' ? 'ai' : 'manual';
+      directionQueue = [];
+      modeBtn.textContent = mode === 'ai' ? 'AI 自动模式：开' : 'AI 自动模式：关';
+      modeBtn.classList.toggle('ai-on', mode === 'ai');
+      if (state === 'idle' || state === 'paused' || state === 'over') draw();
+    }
 
     // ==================== 画面渲染 ====================
 
@@ -397,7 +602,10 @@
       drawSnake();
 
       if (state === 'idle') {
-        drawOverlay('贪吃蛇', '按回车或点击「开始游戏」');
+        drawOverlay(
+          '贪吃蛇',
+          (mode === 'ai' ? '当前【AI 自动模式】，' : '') + '按回车或点击「开始游戏」'
+        );
       } else if (state === 'paused') {
         drawOverlay('已暂停', '按空格或点击「继续」');
       }
