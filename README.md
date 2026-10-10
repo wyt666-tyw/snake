@@ -134,3 +134,7 @@ Yosys（逻辑综合 Synthesis）
 3. 优化：做逻辑化简、时序初步优化，减少门电路数量。
 
 4. 输出： .blif 或 .v 格式门级网表文件。
+<img width="1487" height="753" alt="7dd5feec8bc08f85f7e80c0b925f1e78" src="https://github.com/user-attachments/assets/997f2b9e-a12e-48c4-ad25-bbfdbf538738" />
+<img width="1736" height="1387" alt="0b4295a5abe804cd4f27f451023873f1" src="https://github.com/user-attachments/assets/5f968b67-9e84-47d7-8840-f6dd4fd078fc" />
+
+
